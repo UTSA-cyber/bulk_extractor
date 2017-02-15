@@ -13,6 +13,9 @@
 #include "config.h"
 #include "bulk_extractor.h"
 #include "dig.h"
+#ifdef WIN32
+#include <windows.h>
+#endif
 
 #ifdef HAVE_LIBAFFLIB
 #endif
@@ -708,10 +711,10 @@ int process_raw::pread(unsigned char *buf,size_t bytes,int64_t offset) const
                                     FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
 				     OPEN_EXISTING, 0, NULL);
         if(current_handle==INVALID_HANDLE_VALUE){
-	  fprintf(stderr,"bulk_extractor WIN32 subsystem: cannot open file '%s'\n",fi->name.c_str());
+	  fprintf(stderr,"bulk_extractor WIN32 subsystem: cannot open file '%s': error code %d\n",fi->name.c_str(), GetLastError());
 	  return -1;
 	}
-#else        
+#else
 	current_fd = ::open(fi->name.c_str(),O_RDONLY|O_BINARY);
 	if(current_fd<=0) return -1;	// can't read this data
 #endif
@@ -736,16 +739,37 @@ int process_raw::pread(unsigned char *buf,size_t bytes,int64_t offset) const
     li.QuadPart = offset - fi->offset;
     li.LowPart = SetFilePointer(current_handle, li.LowPart, &li.HighPart, FILE_BEGIN);
     if(li.LowPart == INVALID_SET_FILE_POINTER) return -1;
+    //fprintf(stderr, "**********************\nBytes to read: %u\n", bytes);
     if (FALSE == ReadFile(current_handle, buf, (DWORD) bytes, &bytes_read, NULL)){
         return -1;
     }
+    //fprintf(stderr, "Bytes read: %u\n", bytes_read);
+
+    //if (bytes_read == 0)
+    //{
+    //    fprintf(stderr, "NO BYTES READ. ERROR CODE IS %d.\n", GetLastError());
+    //}
 #else
     ssize_t bytes_read = ::pread64(current_fd,buf,bytes,offset - fi->offset);
 #endif
     if(bytes_read<0) return -1;		// error???
     if((size_t)bytes_read==bytes) return bytes_read; // read precisely the correct amount!
-
     /* Need to recurse */
+
+/***
+Fixes bug with scanning a live drive on Windows.
+
+For some reason during a live drive scan on Windows, when it gets to the end of the data,
+ReadFile() returns 0 if the amount of data left to scan is less than the page size. This
+leads to the recursion call, which never hits a base case, leading to a stack overflow.
+
+Ignoring this last little bit of data supposedly will not impact the final results, so
+we're ignoring it as a temp workaround. THIS MIGHT NEED TO BE FIXED LATER.
+***/
+#ifdef WIN32
+    return 0;
+#endif
+
     ssize_t bytes_read2 = this->pread(buf+bytes_read,bytes-bytes_read,offset+bytes_read);
     if(bytes_read2<0) return -1;	// error on second read
     if(bytes_read==0) return 0;		// kind of odd.
@@ -969,7 +993,8 @@ image_process *image_process::open(std::string fn,bool opt_recurse,
     if(stat(fn.c_str(),&st) && !is_windows_unc){
 	return 0;			// no file?
     }
-    if(S_ISDIR(st.st_mode)){
+    if(S_ISDIR(st.st_mode))
+    {
 	/* If this is a directory, process specially */
 	if(opt_recurse==0){
 	    std::cerr << "error: " << fn << " is a directory but -R (opt_recurse) not set\n";
@@ -1001,7 +1026,8 @@ image_process *image_process::open(std::string fn,bool opt_recurse,
         closedir(dirp);
 	ip = new process_dir(fn);
     }
-    else {
+    else
+    {
 	/* Otherwise open a file by checking extension.
 	 *
 	 * I would rather use the localized version at
@@ -1010,7 +1036,7 @@ image_process *image_process::open(std::string fn,bool opt_recurse,
 	 */
 
 	std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-	
+
 	if(ext=="aff"){
 #ifdef HAVE_LIBAFFLIB
 	    ip = new process_aff(fn,pagesize_,margin_);
